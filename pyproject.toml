@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "losslesscut-embed-markers"
+version = "0.1.0"
+description = "Embed LosslessCut point markers into exported clips without re-encoding."
+requires-python = ">=3.11"
+dependencies = ["json5>=0.9.25,<1"]
+
+[project.scripts]
+llc-markers = "llc_markers.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["llc_markers*"]

@@ -1,0 +1,29 @@
+# Copy to config.local.toml and edit. Forward slashes avoid TOML backslash escapes.
+# These folders are scanned recursively. Original recordings are read only.
+clips_dir = "I:/Video/Cut"
+sources_dir = "I:/Video/Unsorted"
+
+# Optional: projects are read from clips_dir unless you specify another location.
+# projects_dir = "I:/Video/Projects"
+
+# Optional: temporary media, backups, reports, and state default to
+# .llc-markers-work inside this repository (excluded from Git).
+# work_dir = "G:/MarkerWork"
+
+# A segment named 'A1 CH01 Example' can match 'PRE A1 CH01 Example.mp4'.
+prefix = "PRE "
+
+# Optional cleanup, disabled by default. Apply backs up and deletes a project
+# only after ALL its exports and markers pass verification. Preview never deletes.
+delete_projects_after_success = false
+
+# Use names on PATH, or full executable paths.
+ffmpeg = "ffmpeg"
+ffprobe = "ffprobe"
+
+# Optional: write marked copies here instead of replacing exports.
+# Relative subfolders beneath clips_dir are preserved. Unmarked clips aren't copied.
+# output_dir = "I:/Video/Marked Copies"
+
+# Optional exact associations for renamed/unnamed segments; see README.
+# mapping_file = "mapping.local.json"
