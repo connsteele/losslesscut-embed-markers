@@ -1,29 +1,35 @@
-# Copy to config.local.toml and edit. Forward slashes avoid TOML backslash escapes.
-# These folders are scanned recursively. Original recordings are read only.
+# Copy to config.local.toml. Use forward slashes in paths.
+
+# REQUIRED - set these two folders first. Both are scanned recursively.
 clips_dir = "I:/Video/Cut"
 sources_dir = "I:/Video/Unsorted"
 
-# Optional: projects are read from clips_dir unless you specify another location.
-# projects_dir = "I:/Video/Projects"
-
-# Optional: temporary media, backups, reports, and state default to
-# .llc-markers-work inside this repository (excluded from Git).
-# work_dir = "G:/MarkerWork"
-
-# A segment named 'A1 CH01 Example' can match 'PRE A1 CH01 Example.mp4'.
+# OPTIONAL - filename matching. Check this if you use a custom export prefix.
+# 'A1 CH01 Example' matches 'PRE A1 CH01 Example.mp4' with this default.
 prefix = "PRE "
+# Projects default to clips_dir. Set this only if your .llc files live elsewhere.
+# projects_dir = "I:/Video/Projects"
+# Exact associations for renamed/unnamed segments; see README.
+# mapping_file = "mapping.local.json"
 
-# Optional cleanup, disabled by default. Apply backs up and deletes a project
-# only after ALL its exports and markers pass verification. Preview never deletes.
+# OPTIONAL - output location. Omit to update exports in place with verified backups.
+# Set this to make separate marked copies. Unchanged clips are not copied.
+# output_dir = "I:/Video/Marked Copies"
+
+# OPTIONAL - chapter and project cleanup. Both default to false.
+# Remove existing chapters titled exactly Start or Unnamed N (N is a number).
+# LLC point markers and the required MP4/MOV Clip start chapter are preserved.
+# Preview lists the placeholders that would be excluded before Apply changes files.
+remove_placeholder_chapters = false
+# Back up and delete an .llc only after ALL its exports and markers are verified.
+# Preview never deletes projects. Restore the project backup for later edits.
 delete_projects_after_success = false
 
-# Use names on PATH, or full executable paths.
+# OPTIONAL - dependencies. Change only if the tools are not available on PATH.
 ffmpeg = "ffmpeg"
 ffprobe = "ffprobe"
 
-# Optional: write marked copies here instead of replacing exports.
-# Relative subfolders beneath clips_dir are preserved. Unmarked clips aren't copied.
-# output_dir = "I:/Video/Marked Copies"
-
-# Optional exact associations for renamed/unnamed segments; see README.
-# mapping_file = "mapping.local.json"
+# OPTIONAL - storage. Defaults to .llc-markers-work inside this repo, ignored by Git.
+# Contains temporary media AND persistent backups, reports, and processing state.
+# Use run.cmd's safe reset to preserve this data when rebuilding the environment.
+# work_dir = "G:/MarkerWork"

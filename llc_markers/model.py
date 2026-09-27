@@ -102,6 +102,15 @@ def markers_for_segment(project: Project, segment: Segment) -> list[Marker]:
     return [m for m in project.markers if segment.start <= m.start < segment.end]
 
 
+def filter_placeholder_chapters(chapters: list[Chapter]) -> tuple[list[Chapter], list[Chapter]]:
+    """Filter only exact existing placeholder titles, never incoming LLC markers."""
+    kept, removed = [], []
+    for chapter in chapters:
+        target = removed if re.fullmatch(r'Start|Unnamed [0-9]+', chapter.title.strip(), re.IGNORECASE) else kept
+        target.append(chapter)
+    return kept, removed
+
+
 def marker_chapters(markers: list[Marker], offset: float, duration: float, fps: float) -> list[Chapter]:
     chapters = []
     for marker in markers:

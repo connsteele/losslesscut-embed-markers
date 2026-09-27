@@ -41,6 +41,8 @@ def parser():
     p.add_argument('--ffprobe')
     p.add_argument('--delete-projects-after-success', action=argparse.BooleanOptionalAction,
                    default=None, help='Back up and delete fully verified .llc projects during Apply (default: off)')
+    p.add_argument('--remove-placeholder-chapters', action=argparse.BooleanOptionalAction,
+                   default=None, help='Remove existing Start/Unnamed N chapters; preserve named LLC point markers (default: off)')
     return p
 
 

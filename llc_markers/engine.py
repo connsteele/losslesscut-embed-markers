@@ -10,14 +10,15 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+import time
 import uuid
 
 from .media import MediaTools, read_chapters, video_fps
 from .model import (Chapter, MarkerError, build_chapters, chapter_dicts, chapters_equal,
-                    filename_matches, marker_chapters, markers_for_segment, read_project)
+                    filename_matches, filter_placeholder_chapters, marker_chapters, markers_for_segment, read_project)
+from .reporting import ACTIONS, render_text, severity, summarize, summary_lines
 
 VIDEO_SUFFIXES = {'.mp4', '.mov', '.mkv'}
-PROBLEM_STATUSES = {'error', 'unmatched', 'missing_export', 'ambiguous', 'invalid_project'}
 DEFAULT_WORK_DIR = Path(__file__).resolve().parent.parent / '.llc-markers-work'
 
 
@@ -33,10 +34,12 @@ class Settings:
     mapping_file: Path | None = None
     output_dir: Path | None = None
     delete_projects_after_success: bool = False
+    remove_placeholder_chapters: bool = False
 
     def validate(self):
-        if not isinstance(self.delete_projects_after_success, bool):
-            raise MarkerError('delete_projects_after_success must be true or false (without quotes)')
+        for name in ('delete_projects_after_success', 'remove_placeholder_chapters'):
+            if not isinstance(getattr(self, name), bool):
+                raise MarkerError(f'{name} must be true or false (without quotes)')
         for name in ('projects_dir', 'clips_dir', 'sources_dir'):
             path = getattr(self, name)
             if not path.is_dir():
@@ -277,6 +280,7 @@ def cleanup_projects(settings, paths, parsed_projects, project_signatures, proje
 
 
 def process_batch(settings: Settings, apply: bool = False, emit=print) -> dict:
+    started = time.monotonic()
     settings.validate()
     settings.work_dir.mkdir(parents=True, exist_ok=True)
     temp_root = settings.work_dir / 'temp'
@@ -288,18 +292,25 @@ def process_batch(settings: Settings, apply: bool = False, emit=print) -> dict:
               'projects_dir': str(settings.projects_dir), 'clips_dir': str(settings.clips_dir),
               'report_path': str(report_path), 'results': [], 'unused_markers': [],
               'delete_projects_after_success': settings.delete_projects_after_success,
+              'remove_placeholder_chapters': settings.remove_placeholder_chapters,
+              'started_at': datetime.now(timezone.utc).isoformat(),
               'cleanup_results': []}
 
     def report_item(status, **details):
-        item = dict(status=status, **details)
+        item = dict(status=status, severity=severity(status), **details)
+        if status in ACTIONS:
+            item['action'] = ACTIONS[status]
         report['results'].append(item)
-        emit(f"[{status}] {details.get('clip', details.get('project', ''))}: {details.get('message', '')}")
+        emit(f"[{status}] {Path(details.get('clip', details.get('project', ''))).name}: {details.get('message', '')}")
         write_json(report_path, report)
         return item
 
     exclusions = tuple(p for p in (settings.work_dir, settings.output_dir) if p)
     projects = files_under(settings.projects_dir, {'.llc'}, exclusions)
     clips = files_under(settings.clips_dir, VIDEO_SUFFIXES, exclusions)
+    emit(f"{'Apply' if apply else 'Preview'}: {len(projects)} project(s), {len(clips)} clip(s). "
+         f"Project deletion {'ON' if settings.delete_projects_after_success else 'OFF'}; "
+         f"placeholder cleanup {'ON' if settings.remove_placeholder_chapters else 'OFF'}.")
     source_index = defaultdict(list)
     for source in files_under(settings.sources_dir, VIDEO_SUFFIXES, exclusions):
         source_index[source.name.casefold()].append(source)
@@ -333,7 +344,8 @@ def process_batch(settings: Settings, apply: bool = False, emit=print) -> dict:
                 considered.update(matches)
                 if len(matches) != 1:
                     status = 'ambiguous' if matches else 'missing_export'
-                    report_item(status, project=str(path), segment_key=key, message=f'{segment.name!r}: {len(matches)} matching clips')
+                    report_item(status, project=str(path), segment_key=key, segment_name=segment.name,
+                                message=f'{segment.name!r}: {len(matches)} matching clips')
                     continue
                 job = (project, segment, matches[0], key)
                 jobs.append(job)
@@ -345,8 +357,8 @@ def process_batch(settings: Settings, apply: bool = False, emit=print) -> dict:
         if clip not in considered:
             report_item('unmatched', clip=str(clip), message='No saved segment matches this export; file left unchanged')
     source_infos = {}
-    for project, segment, clip, key in jobs:
-        details = {'project': str(project.path), 'segment_key': key, 'clip': str(clip)}
+    for job_number, (project, segment, clip, key) in enumerate(jobs, 1):
+        details = {'project': str(project.path), 'segment_key': key, 'segment_name': segment.name, 'clip': str(clip)}
         try:
             if len(claimed[clip]) != 1:
                 report_item('ambiguous', **details, message='Multiple saved segments claim this clip: ' + ', '.join(claimed[clip]))
@@ -357,10 +369,11 @@ def process_batch(settings: Settings, apply: bool = False, emit=print) -> dict:
                 raise MarkerError(f'Interrupted commit recorded at {record_path.with_suffix(".pending.json")}; review recovery instructions')
             state = load_state(record_path)
             markers = markers_for_segment(project, segment)
-            if not markers and not state and not settings.delete_projects_after_success:
+            if not markers and not state and not settings.delete_projects_after_success and not settings.remove_placeholder_chapters:
                 report_item('no_markers', **details, message='No point markers in this segment; no media write needed')
                 continue
             before = signature(clip)
+            emit(f'[{job_number}/{len(jobs)}] Checking {clip.name}...')
             info = tools.info(clip)
             duration = float(info['format']['duration'])
             fps = video_fps(info)
@@ -384,20 +397,21 @@ def process_batch(settings: Settings, apply: bool = False, emit=print) -> dict:
                 entry.check_signatures()
                 cleanup_evidence[key] = entry
 
-            if not markers and not state:
+            base = base_chapters(current, state if not settings.output_dir else None)
+            kept_base, removed = filter_placeholder_chapters(base) if settings.remove_placeholder_chapters else (base, [])
+            if not markers and not state and not removed:
                 # Cleanup still needs proof that an unmarked export belongs to
                 # its saved segment. It remains untouched, even in copy mode.
                 remember_verification(clip, current, before)
                 report_item('no_markers', **details, source=str(source), destination=str(clip),
                             offset_seconds=offset, matched_packets=matched_packets,
-                            message='No point markers; export timing verified for project cleanup')
+                            message='No new point markers or chapter changes; export timing verified')
                 continue
-            base = base_chapters(current, state if not settings.output_dir else None)
-            desired = build_chapters(base, marker_chapters(markers, offset, duration, fps), duration, clip.suffix)
+            desired = build_chapters(kept_base, marker_chapters(markers, offset, duration, fps), duration, clip.suffix)
             details.update(destination=str(destination), source=str(source), offset_seconds=offset,
                            matched_packets=matched_packets,
                            markers=[{'name':m.name, 'source_seconds':m.start, 'clip_seconds':m.start-offset} for m in markers],
-                           chapters=chapter_dicts(desired))
+                           chapters=chapter_dicts(desired), placeholder_chapters_filtered=chapter_dicts(removed))
             destination_before = signature(destination) if destination.exists() else None
             if destination.exists() and destination != clip:
                 if not state:
@@ -423,7 +437,7 @@ def process_batch(settings: Settings, apply: bool = False, emit=print) -> dict:
                 continue
             if not apply:
                 remember_verification(clip, current, before)
-                report_item('ready', **details, message=f'{len(markers)} point marker(s); {len(desired)} total embedded chapter(s)')
+                report_item('ready', **details, message=f'{len(markers)} point marker(s); {len(removed)} existing placeholder(s) excluded; {len(desired)} total chapter(s)')
                 continue
             emit(f'[processing] {clip.name}: writing and checking audio/video and chapter labels...')
             with tempfile.TemporaryDirectory(prefix='remux-', dir=temp_root) as temporary:
@@ -436,39 +450,22 @@ def process_batch(settings: Settings, apply: bool = False, emit=print) -> dict:
                           'offset_seconds':offset, 'base_chapters':chapter_dicts(base), 'chapters':chapter_dicts(desired)}
                 backup = install_result(settings, clip, output, destination, before, record, record_path, run_id)
             remember_verification(destination, desired, record['output_signature'], record['output_sha256'])
-            report_item('updated', **details, backup=str(backup) if backup else None, message=f'Embedded {len(markers)} point marker(s); verified unchanged audio/video')
+            report_item('updated', **details, backup=str(backup) if backup else None,
+                        message=f'Wrote {len(markers)} point marker(s); excluded {len(removed)} existing placeholder(s); verified unchanged audio/video')
         except (MarkerError, OSError, ValueError, KeyError) as exc:
             report_item('error', **details, message=str(exc))
     if settings.delete_projects_after_success:
         cleanup_projects(settings, projects, parsed_projects, project_signatures, project_hashes,
                          cleanup_evidence, report, report_path, tools, apply, emit)
-    report['summary'] = dict(Counter(item['status'] for item in report['results']))
-    report['cleanup_summary'] = dict(Counter(item['status'] for item in report['cleanup_results']))
     report['project_count'] = len(projects)
     report['clip_count'] = len(clips)
-    report['had_problems'] = (any(item['status'] in PROBLEM_STATUSES for item in report['results'])
-                              or any(item['status'] in {'retained', 'error'} for item in report['cleanup_results']))
+    report['elapsed_seconds'] = round(time.monotonic() - started, 3)
+    report['finished_at'] = datetime.now(timezone.utc).isoformat()
+    summarize(report)
     write_json(report_path, report)
     text_path = report_path.with_suffix('.txt')
-    lines = [f"LosslessCut marker {report['mode']} — {run_id}", f'Projects: {len(projects)}; clips: {len(clips)}',
-             ', '.join(f'{k}: {v}' for k,v in report['summary'].items()), '']
-    for item in report['results']:
-        lines.append(f"[{item['status']}] {item.get('clip', item.get('project',''))}\n  {item['message']}")
-        if item.get('segment_key'):
-            lines.append(f"  Mapping key: {item['segment_key']}")
-        for marker in item.get('markers', []):
-            lines.append(f"  {marker['clip_seconds']:.3f}s — {marker['name']}")
-    if report['unused_markers']:
-        lines.append('\nUnused markers (outside every saved segment):')
-        lines.extend(f"  {m['project']} @ {m['source_seconds']:.3f}s — {m['name']}" for m in report['unused_markers'])
-    if settings.delete_projects_after_success:
-        lines.append(f"\nProject cleanup: {report['cleanup_summary']}")
-        for item in report['cleanup_results']:
-            lines.append(f"[{item['status']}] {item['project']}\n  {item['message']}")
-            if item.get('backup'):
-                lines.append(f"  Project backup: {item['backup']}")
-    text_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-    emit(f"Summary: {report['summary']}\nReport: {text_path}")
-    if settings.delete_projects_after_success:
-        emit(f"Project cleanup: {report['cleanup_summary']}")
+    text_path.write_text(render_text(report), encoding='utf-8')
+    for line in summary_lines(report):
+        emit(line)
+    emit(f'Readable report: {text_path}\nJSON report: {report_path}')
     return report

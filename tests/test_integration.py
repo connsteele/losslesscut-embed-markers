@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from llc_markers.engine import Settings, process_batch, file_hash, state_path
 from llc_markers.media import MediaTools, read_chapters
-from llc_markers.model import MarkerError
+from llc_markers.model import Chapter, MarkerError, build_chapters
 
 
 @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'FFmpeg/FFprobe required')
@@ -114,13 +114,17 @@ class IntegrationTests(MediaTestCase):
                    {'start':5.72,'name':'Second marker'},
                    {'start':11.9,'name':'Outside exports'}]
         (self.root/'cuts'/'second.llc').write_text(json.dumps({'version':2,'mediaFileName':'source.mp4','cutSegments':entries}),encoding='utf-8')
-        report = self.run_batch(True)
+        report = process_batch(self.settings, True, emit=lambda s: None)
         self.assertEqual(report['project_count'],2)
         self.assertEqual(report['summary']['updated'],2)
         self.assertEqual([c.title for c in read_chapters(self.tools.info(second))],
                          ['Existing chapter','First = #; café','Second marker'])
         self.assertEqual(len(report['unused_markers']),1)
-        self.assertEqual(self.run_batch(True)['summary']['up_to_date'],2)
+        self.assertEqual(report['outcome'], 'completed_with_attention')
+        self.assertEqual(report['error_count'], 0)
+        self.assertIn('unused point marker', Path(report['report_path']).with_suffix('.txt').read_text(encoding='utf-8'))
+        repeated = process_batch(self.settings, True, emit=lambda s: None)
+        self.assertEqual(repeated['summary']['up_to_date'],2)
 
     def test_failed_verification_does_not_replace_export(self):
         original = file_hash(self.clip)
@@ -129,6 +133,67 @@ class IntegrationTests(MediaTestCase):
         self.assertEqual(report['summary']['error'],1)
         self.assertEqual(file_hash(self.clip),original)
         self.assertEqual(read_chapters(self.tools.info(self.clip)),[])
+
+
+class PlaceholderTests(MediaTestCase):
+    def add_existing_chapters(self, path, titles):
+        info = self.tools.info(path)
+        duration = float(info['format']['duration'])
+        chapters = build_chapters([], [Chapter(i, i + .1, title) for i, title in enumerate(titles)], duration, path.suffix)
+        replacement = self.root / 'work' / path.name
+        self.tools.remux(path, replacement, chapters, info)
+        os.replace(replacement, path)
+
+    def test_preview_apply_and_restore_existing_placeholders(self):
+        self.add_existing_chapters(self.clip, ['Start', 'Unnamed 2', 'Story beat'])
+        self.run_batch(True)
+        original = file_hash(self.clip)
+        self.assertIn('Unnamed 2', [c.title for c in read_chapters(self.tools.info(self.clip))])
+        self.settings.remove_placeholder_chapters = True
+        preview = self.run_batch()
+        self.assertEqual(file_hash(self.clip), original)
+        self.assertEqual(preview['placeholder_count'], 2)
+        self.assertIn('Excluded existing placeholder', Path(preview['report_path']).with_suffix('.txt').read_text(encoding='utf-8'))
+        result = self.run_batch(True)
+        self.assertEqual(result['summary']['updated'], 1)
+        labels = [c.title for c in read_chapters(self.tools.info(self.clip))]
+        self.assertEqual(labels, ['Clip start', 'Story beat', 'Test statue'])
+        self.assertEqual(self.run_batch(True)['summary']['up_to_date'], 1)
+        self.settings.remove_placeholder_chapters = False
+        self.run_batch(True)
+        self.assertEqual([c.title for c in read_chapters(self.tools.info(self.clip))],
+                         ['Start', 'Unnamed 2', 'Story beat', 'Test statue'])
+
+    def test_placeholder_only_clip_can_be_cleaned_without_point_markers(self):
+        self.save_project(None)
+        self.add_existing_chapters(self.clip, ['Start', 'Unnamed 1'])
+        original_hashes = self.tools.stream_hashes(self.clip)
+        self.settings.remove_placeholder_chapters = True
+        report = self.run_batch(True)
+        self.assertEqual(report['summary'], {'updated': 1, 'no_markers': 1})
+        self.assertEqual(read_chapters(self.tools.info(self.clip)), [])
+        self.assertEqual(self.tools.stream_hashes(self.clip), original_hashes)
+        self.assertEqual(self.run_batch(True)['summary']['up_to_date'], 1)
+
+    def test_llc_marker_names_are_never_filtered(self):
+        self.add_existing_chapters(self.clip, ['Start', 'Unnamed 1'])
+        self.settings.remove_placeholder_chapters = True
+        for label in ('Start', 'Unnamed 1'):
+            with self.subTest(label=label):
+                self.save_project(label)
+                self.run_batch(True)
+                self.assertEqual([c.title for c in read_chapters(self.tools.info(self.clip))], ['Clip start', label])
+
+    def test_copy_mode_keeps_original_placeholder_chapters(self):
+        self.save_project(None)
+        self.add_existing_chapters(self.clip, ['Start', 'Unnamed 1'])
+        self.settings.remove_placeholder_chapters = True
+        self.settings.output_dir = self.root / 'outputs'
+        original = file_hash(self.clip)
+        self.run_batch(True)
+        self.assertEqual(file_hash(self.clip), original)
+        self.assertEqual(read_chapters(self.tools.info(self.settings.output_dir / self.clip.name)), [])
+        self.assertFalse((self.settings.output_dir / self.empty.name).exists())
 
 
 class CleanupTests(MediaTestCase):

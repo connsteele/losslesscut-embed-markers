@@ -31,12 +31,18 @@ Chapter titles supply marker names. LosslessCut colors and arbitrary tags are no
 ## Windows quick start
 
 1. Install Python and FFmpeg as described above.
-2. Double-click **`setup.cmd`**. It creates a repository-local `.venv`, installs the Python package, and copies the example configuration if a local one does not exist. Internet access is needed for the initial Python dependencies.
+2. Double-click **`setup.cmd`**. It creates a repository-local `.venv`, installs the Python package, copies the example configuration if a local one does not exist, and checks FFmpeg and FFprobe on PATH. Internet access is needed for the initial Python dependencies.
 3. Edit **`config.local.toml`** with your export and original recording directories. Projects default to the export directory; working files default to `.llc-markers-work` inside the repo.
 4. Double-click **`run.cmd`** and choose **1 — Preview**.
 5. Read the results or text report. Once the matches look correct, run it again and choose **2 — Apply**.
 
 The launcher processes the configured batch once; it does not prompt for each clip or watch folders. Local configuration, the virtual environment, and media are excluded from Git.
+
+The menu also offers **3 — Open the latest readable report**, **4 — Reset setup**, and **5 — Exit**. Reset removes only `.venv`, generated package metadata, and known Python cache directories. It preserves `config.local.toml`, footage, mapping files, and all working data, including backups, reports, and processing state. Run `setup.cmd` afterward to rebuild the environment with your existing configuration. Reset remains accessible when `.venv` is missing, using Python on PATH for its checks.
+
+Reset refuses to proceed if a run lock exists, a configured media/work directory overlaps a reset target, or a target contains linked files/directories. Finish active processing first. The reset operates only on the repository containing the launcher; it does not uninstall Python or FFmpeg or change Windows settings. Use this option instead of `git clean -fdX`, which would also erase ignored recovery data. Reset deliberately keeps your configuration; to change its settings, edit `config.local.toml` using the example as a reference.
+
+Setup reports each media tool separately, showing its location when found and confirming it can run. If either tool is missing or fails to start, setup prints installation and PATH instructions and exits with code 1; the Python environment and configuration remain available. Install an FFmpeg build containing both executables, add their folder to Windows PATH, then reopen setup from a new terminal or Explorer window. You can instead configure full executable paths in `config.local.toml` for processing; setup's check only examines PATH.
 
 On machines with `G:\GPT\Temp` and `G:\GPT\Caches`, setup uses those existing folders for process temporary files and pip downloads. It does not change Windows-wide settings. Processing uses the configured work directory for temporary media.
 
@@ -48,6 +54,7 @@ Example `config.local.toml`:
 clips_dir = "I:/Video/Cut"
 sources_dir = "I:/Video/Unsorted"
 prefix = "PRE "
+remove_placeholder_chapters = false
 delete_projects_after_success = false
 ```
 
@@ -55,19 +62,22 @@ Use forward slashes in TOML paths. Relative paths are resolved relative to the c
 
 Only `clips_dir` and `sources_dir` are required. The prefix defaults to `PRE ` if omitted. FFmpeg and FFprobe default to executables on PATH. Explicit `projects_dir` and `work_dir` values continue to override the defaults.
 
+The example configuration places the required folders first, followed by optional filename matching, output location, cleanup behavior, dependency paths, and working storage. Settings remain flat TOML keys; the sections are comments, so existing configurations remain compatible.
+
 The default working directory is anchored to the repository's location, not your terminal's current directory. It contains temporary files plus persistent `backups`, `Project Backups`, `reports`, and `state` folders. Temporary remux files are cleaned up automatically; preserve the other folders between runs. `.llc-markers-work/` is excluded from Git. You can still set `work_dir` to another drive for more space. If you change it, copy your existing state, both backup folders, and reports to the new location before processing again.
 
 | Setting | Meaning |
 | --- | --- |
-| `projects_dir` | Optional: recursively search here for `.llc` files. Defaults to the resolved `clips_dir`. |
 | `clips_dir` | Recursively search here for exported `.mp4`, `.mov`, and `.mkv` clips. |
 | `sources_dir` | Recursively search for originals named by the projects. Originals are read only. |
-| `work_dir` | Optional: temporary media, state, reports, and backups. Defaults to the repo's `.llc-markers-work`. |
 | `prefix` | Optional export filename prefix; default `PRE `. Both exact and prefixed labels are accepted. |
-| `ffmpeg`, `ffprobe` | Executable names on PATH or full executable paths. |
-| `output_dir` | Optional: create marked copies instead of replacing exports. Relative subfolders are preserved. Unmarked clips are not copied. |
+| `projects_dir` | Optional: recursively search here for `.llc` files. Defaults to the resolved `clips_dir`. |
 | `mapping_file` | Optional JSON file providing exact associations when names no longer match. |
+| `output_dir` | Optional: create modified copies instead of replacing exports. Relative subfolders are preserved. Clips needing no changes are not copied. |
+| `remove_placeholder_chapters` | Optional boolean, default `false`: exclude existing chapters named exactly `Start` or `Unnamed N` while preserving incoming `.llc` point markers. Preview lists exclusions. |
 | `delete_projects_after_success` | Optional boolean, default `false`: during Apply, back up and delete each `.llc` only after all its exports pass verification. Preview only reports eligibility. |
+| `ffmpeg`, `ffprobe` | Executable names on PATH or full executable paths. |
+| `work_dir` | Optional: temporary media, state, reports, and backups. Defaults to the repo's `.llc-markers-work`. |
 
 Work/output directories are excluded from scans. Symbolic links are not followed. Each destination must match one segment; ambiguous associations are reported and left unchanged.
 
@@ -125,7 +135,15 @@ On other platforms, create/activate a virtual environment and run `python -m pip
 8. Record the result and continue. A clip failure does not stop unrelated clips.
 9. If project cleanup is enabled, check every project independently at the end of the batch, verify its backup, and delete only eligible `.llc` files.
 
-Clips without markers are untouched. An exception is a previously processed clip whose annotations were subsequently removed: its managed chapters are removed while original unrelated chapters are restored.
+Clips without point markers are normally untouched. Exceptions are placeholder cleanup when enabled, and a previously processed clip whose annotations were subsequently removed: its managed chapters are removed while original unrelated chapters are restored according to the placeholder setting.
+
+### Optional placeholder-chapter cleanup
+
+Set `remove_placeholder_chapters = true` to exclude existing chapters whose entire title is `Start` or `Unnamed N`, where N contains digits. Matching ignores capitalization and surrounding whitespace. It preserves other titles such as `Start here`, `Unnamed hero`, and `Clip start`. This setting filters the pre-existing chapter list only: an incoming `.llc` point marker you deliberately named `Start` or `Unnamed 1` is still embedded.
+
+Preview lists each excluded placeholder's title and position. Apply uses the same stream-copy verification and backups as any other chapter update. This can modify a clip with zero point markers, including creating a separate copy when `output_dir` is set. MP4/MOV may still need a `Clip start` chapter at zero; that format requirement remains.
+
+The original chapter baseline is kept in processing state. Turning this setting back off and applying again restores its preserved placeholders, provided the matching project, clip path, and state remain available. For projects already removed by project cleanup, restore their `.llc` backups first. Unmatched clips are not changed by this option.
 
 ### Repeat runs and edits
 
@@ -155,13 +173,15 @@ Cleanup runs after clip processing, independently for each project. A missing or
 
 Before deleting, the tool copies the exact `.llc` to `work_dir/Project Backups/<run-id>/<relative-project-path>`, verifies its SHA-256 checksum, and records that location in the JSON report. With the default settings, this is inside the repo's gitignored `.llc-markers-work/Project Backups/`. Backup or deletion errors are reported and do not stop cleanup of unrelated projects. Only saved `.llc` files are eligible; source recordings and other companion files are preserved.
 
-With `output_dir`, marked copies must pass verification before the project is removed. Unmarked exports still stay in `clips_dir` and are verified there; they are not copied. Finish saving and close projects before running cleanup so LosslessCut does not save changes or recreate a deleted project during the run.
+With `output_dir`, modified copies must pass verification before the project is removed. Exports needing no changes stay in `clips_dir` and are verified there; they are not copied. A clip with no point markers can still need a copy if placeholder cleanup changes its chapters. Finish saving and close projects before running cleanup so LosslessCut does not save changes or recreate a deleted project during the run.
 
 To revise cuts or markers later, copy the recorded project backup back to its original path, set cleanup to `false`, and keep the existing processing state. Avoid overwriting a newer project when restoring. Exports left in the scan folder after project deletion can be reported as `unmatched` on later runs; file completed clips or restore their projects if you need to process them again.
 
 ## Reports and recovery
 
-Completed runs produce JSON and readable text reports under `work_dir/reports`. JSON progress is saved after each reported clip, preserving partial results after an interruption.
+Completed runs produce JSON and readable text reports under `work_dir/reports`. JSON progress is saved after each reported clip, preserving partial results after an interruption. The console shows the active cleanup settings, clip progress, a readable outcome, counts by result type, and elapsed time. Text reports lead with the summary and an **Items needing attention** section containing suggested next steps and mapping keys. Detailed results include point-marker positions, excluded placeholder chapters, clip backups, and project-cleanup backups. Menu option 3 opens the latest text report from the configured work directory.
+
+Final JSON reports add `outcome`, `error_count`, `warning_count`, `marker_count`, `placeholder_count`, start/finish times, and elapsed seconds. Each clip result includes a severity and unresolved results include an action. Warning counts count reported events (a retained project may also contain a missing export); per-category counts and explanations identify the actual affected items. Placeholder totals count baseline chapters excluded from outputs planned or written in this run, not chapters permanently erased from state.
 
 | Status | Meaning |
 | --- | --- |
@@ -173,6 +193,8 @@ Completed runs produce JSON and readable text reports under `work_dir/reports`. 
 | `missing_export`, `ambiguous`, `invalid_project`, `error` | Inspect the report. Affected media was not intentionally replaced unless the error occurred after the final commit; a pending transaction identifies that case. |
 
 Exit codes: **0** = no unresolved items; **2** = completed with items needing attention; **1** = setup/configuration/run failure; **130** = user interruption. Empty batches report zero projects/clips and do no media work.
+
+Unused point markers now count as items needing attention even when project deletion is disabled. A completed batch can contain successful updates alongside warnings or item-level errors; its report distinguishes those from a failure to start the run.
 
 Cleanup has its own `cleanup_results` and `cleanup_summary` in JSON and a separate section in text reports:
 
@@ -214,4 +236,4 @@ $env:TMP = "G:\GPT\Temp"
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-Coverage includes JSON5 parsing, marker boundaries, filename matching, ambiguous associations, timestamp alignment, MP4 chapter layout, metadata escaping, preview preservation, backups, updates/removals, repeat runs, output protection, and project cleanup. Cleanup tests cover zero-marker exports, per-project eligibility, partial failures, changed files, exact backups, restoration, copy mode, and interrupted deletion.
+Coverage includes JSON5 parsing, marker boundaries, filename matching, ambiguous associations, timestamp alignment, MP4 chapter layout, metadata escaping, preview preservation, backups, updates/removals, repeat runs, output protection, and project cleanup. Cleanup tests cover zero-marker exports, per-project eligibility, partial failures, changed files, exact backups, restoration, copy mode, and interrupted deletion. Additional tests cover placeholder cleanup/restoration, preserving explicitly named point markers, attention reporting, and real Windows setup resets in disposable fixtures that retain configuration, media, and recovery data.

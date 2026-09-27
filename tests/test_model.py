@@ -7,10 +7,16 @@ from llc_markers.engine import base_chapters, match_clip, Settings
 from llc_markers.media import packet_offset
 from llc_markers.model import (Chapter, Marker, MarkerError, Project, Segment, build_chapters,
                                chapter_dicts, ffmetadata, filename_matches,
-                               marker_chapters, markers_for_segment, read_project)
+                               filter_placeholder_chapters, marker_chapters, markers_for_segment, read_project)
 
 
 class ModelTests(unittest.TestCase):
+    def test_only_exact_placeholder_titles_are_filtered(self):
+        labels = ['Start', 'Unnamed 1', ' UNNAMED 20 ', 'Start here', 'Unnamed hero', 'Clip start', 'Unnamed']
+        kept, removed = filter_placeholder_chapters([Chapter(i, i + 1, label) for i, label in enumerate(labels)])
+        self.assertEqual([c.title for c in removed], labels[:3])
+        self.assertEqual([c.title for c in kept], labels[3:])
+
     def test_json5_and_point_marker(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'test.llc'

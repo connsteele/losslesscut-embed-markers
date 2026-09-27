@@ -32,6 +32,21 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(settings.work_dir, DEFAULT_WORK_DIR)
             self.assertEqual(settings.prefix, 'PRE ')
             self.assertFalse(settings.delete_projects_after_success)
+            self.assertFalse(settings.remove_placeholder_chapters)
+
+    def test_placeholder_setting_and_override(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'cleanup.toml'
+            config.write_text('clips_dir = "."\nsources_dir = "."\nremove_placeholder_chapters = true\n')
+            settings = settings_from_args(parser().parse_args(['--config', str(config)]))
+            self.assertTrue(settings.remove_placeholder_chapters)
+            settings = settings_from_args(parser().parse_args([
+                '--config', str(config), '--no-remove-placeholder-chapters']))
+            self.assertFalse(settings.remove_placeholder_chapters)
+            config.write_text('clips_dir = "."\nsources_dir = "."\nremove_placeholder_chapters = "false"\n')
+            settings = settings_from_args(parser().parse_args(['--config', str(config)]))
+            with self.assertRaisesRegex(MarkerError, 'true or false'):
+                settings.validate()
 
     def test_cleanup_toggle_and_cli_overrides(self):
         with tempfile.TemporaryDirectory() as directory:
