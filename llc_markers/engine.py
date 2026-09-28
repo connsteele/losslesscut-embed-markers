@@ -338,14 +338,25 @@ def process_batch(settings: Settings, apply: bool = False, emit=print) -> dict:
             parsed_projects[path] = project
             for marker in project.markers:
                 if not any(s.start <= marker.start < s.end for s in project.segments):
-                    report['unused_markers'].append({'project': str(path), 'name': marker.name, 'source_seconds': marker.start})
+                    endings = [s for s in project.segments if s.end == marker.start]
+                    message = ('Marker is exactly at an excluded cut end; cut ranges include their start but not their end.'
+                               if endings else 'Marker is outside every saved cut range.')
+                    report['unused_markers'].append({
+                        'project': str(path), 'name': marker.name, 'source_seconds': marker.start,
+                        'reason': 'at_cut_end' if endings else 'outside_cuts', 'message': message,
+                        'ending_segments': [{'name': s.name, 'start': s.start, 'end': s.end} for s in endings],
+                        'action': 'If wanted, extend the intended cut past the marker and re-export it, or move the marker inside the intended cut. Otherwise remove the unwanted marker in LosslessCut.'})
             for segment in project.segments:
                 key, matches = match_clip(project, segment, settings, clips, mappings)
                 considered.update(matches)
                 if len(matches) != 1:
                     status = 'ambiguous' if matches else 'missing_export'
                     report_item(status, project=str(path), segment_key=key, segment_name=segment.name,
-                                message=f'{segment.name!r}: {len(matches)} matching clips')
+                                source_name=project.source_name, segment_start=segment.start, segment_end=segment.end,
+                                message=(f'{segment.name or "(unnamed segment)"!r} '
+                                         f'[{segment.start:.3f}s - {segment.end:.3f}s]: {len(matches)} matching clips'
+                                         + ('; name the segment and export it, or supply an exact mapping for an existing export'
+                                            if not segment.name.strip() else '')))
                     continue
                 job = (project, segment, matches[0], key)
                 jobs.append(job)

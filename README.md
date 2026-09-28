@@ -128,7 +128,7 @@ On other platforms, create/activate a virtual environment and run `python -m pip
 1. Parse each JSON5 project. Entries with an end time are cut segments; entries without one are point markers.
 2. Match saved segment labels to actual exports. Export presence controls processing; changing `selected` in LosslessCut does not discard saved annotations.
 3. Include markers from segment start (inclusive) to end (exclusive). A shared-boundary marker belongs to the segment starting there; overlapping segments can both receive it.
-4. Compare unique encoded video packet hashes and timestamps near the export's beginning and end against the original. Use this verified offset instead of assuming the requested cut start was exact. At least five unique matches are required at each checked end.
+4. Compare unique encoded video packet hashes and timestamps near the export's beginning and end against the original. Use this verified offset instead of assuming the requested cut start was exact. At least five unique matches are required at each checked end. If static/repeated video yields too few unique packets, expand the four-second sample to 8, 16, then at most 32 seconds (limited by clip duration). Contradictory timestamps still fail immediately; beginning/end offsets must still agree. Source searches use an absolute end time so keyframe seeking cannot shorten the intended search.
 5. Preserve unrelated chapters. Combine labels at the same millisecond using ` | ` instead of dropping one.
 6. Write a temporary file using stream copy. Verify chapter labels/times, content stream properties, duration, and SHA-256 hashes of encoded audio/video.
 7. Back up an existing destination and verify the backup. Copy the result to a temporary file on the destination volume, verify the copy, then replace the destination atomically. Preserve the export's modification time.
@@ -136,6 +136,8 @@ On other platforms, create/activate a virtual environment and run `python -m pip
 9. If project cleanup is enabled, check every project independently at the end of the batch, verify its backup, and delete only eligible `.llc` files.
 
 Clips without point markers are normally untouched. Exceptions are placeholder cleanup when enabled, and a previously processed clip whose annotations were subsequently removed: its managed chapters are removed while original unrelated chapters are restored according to the placeholder setting.
+
+An unused marker exactly at a cut's end is identified explicitly in the report, along with that cut's name and range. To include the moment, extend the cut past it and re-export, or move the marker inside the intended cut. The tool never silently changes cut boundaries or clamps a marker to a different moment. Missing-export reports include the source filename and saved range; unnamed cuts need a name and export, or an exact mapping to an existing export. Files such as LosslessCut's extracted `*-data-bin_data.bin` sidecars are not video exports and are left alone.
 
 ### Optional placeholder-chapter cleanup
 

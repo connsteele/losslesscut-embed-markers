@@ -134,6 +134,26 @@ class IntegrationTests(MediaTestCase):
         self.assertEqual(file_hash(self.clip),original)
         self.assertEqual(read_chapters(self.tools.info(self.clip)),[])
 
+    def test_boundary_and_unnamed_missing_export_report_explains_saved_ranges(self):
+        self.project.write_text(json.dumps({'version': 2, 'mediaFileName': 'source.mp4', 'cutSegments': [
+            {'start': 2.35, 'end': 7.9, 'name': 'Sample'},
+            {'start': 7.9, 'name': 'At cut end'},
+            {'start': 10, 'end': 11, 'name': ''}]}), encoding='utf-8')
+        self.settings.delete_projects_after_success = True
+        before = file_hash(self.clip)
+        report = process_batch(self.settings, False, emit=lambda s: None)
+        self.assertEqual(report['unused_markers'][0]['reason'], 'at_cut_end')
+        self.assertEqual(report['cleanup_summary'], {'retained': 1})
+        missing = next(x for x in report['results'] if x['status'] == 'missing_export')
+        self.assertEqual(missing['segment_start'], 10)
+        readable = Path(report['report_path']).with_suffix('.txt').read_text(encoding='utf-8')
+        self.assertIn('exactly at an excluded cut end', readable)
+        self.assertIn('Cut ending here: Sample', readable)
+        self.assertIn('Source: source.mp4 @ 10.000s - 11.000s', readable)
+        self.assertIn('(unnamed segment)', readable)
+        self.assertEqual(file_hash(self.clip), before)
+        self.assertTrue(self.project.exists())
+
 
 class PlaceholderTests(MediaTestCase):
     def add_existing_chapters(self, path, titles):

@@ -70,10 +70,16 @@ def render_text(report):
                 lines.append(f"  Saved segment: {item['segment_name']}")
             if item.get('segment_key'):
                 lines.append(f"  Mapping key: {item['segment_key']}")
+            if item.get('source_name'):
+                lines.append(f"  Source: {item['source_name']} @ {item['segment_start']:.3f}s - {item['segment_end']:.3f}s")
             lines.append(f"  Next step: {item.get('action', '')}")
         for marker in report['unused_markers']:
             lines.append(f"[unused_marker] {marker['project']} @ {marker['source_seconds']:.3f}s - {marker['name']}")
-            lines.append('  Next step: include this point in an exported cut, or remove it in LosslessCut if it is unwanted.')
+            if marker.get('message'):
+                lines.append(f"  {marker['message']}")
+            for segment in marker.get('ending_segments', []):
+                lines.append(f"  Cut ending here: {segment['name']} [{segment['start']:.3f}s - {segment['end']:.3f}s]")
+            lines.append('  Next step: ' + marker.get('action', 'Include this point in an exported cut, or remove it in LosslessCut if it is unwanted.'))
         lines.append('')
     lines.append('ALL CLIP RESULTS')
     for item in report['results']:

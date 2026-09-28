@@ -12,6 +12,10 @@ import subprocess
 from .model import Chapter, MarkerError, chapters_equal, ffmetadata
 
 
+class InsufficientPacketMatches(MarkerError):
+    """A larger sample may resolve repeated/static encoded video packets."""
+
+
 class MediaTools:
     def __init__(self, ffmpeg: str, ffprobe: str, temp_dir: Path):
         self.ffmpeg = ffmpeg
@@ -49,24 +53,51 @@ class MediaTools:
             raise MarkerError('Source has a nonzero container start time; this timing convention is not supported yet')
         if abs(duration - (requested_end - requested_start)) > max_drift:
             raise MarkerError('Clip duration differs too much from the named segment; possible stale or merged export')
-        first = self.packets(clip, 0, min(4, duration))
-        source_first = self.packets(source, requested_start - max_drift,
-                                    min(requested_start, max_drift) + max_drift + 6)
-        offset, count = packet_offset(source_first, first)
+        offset, count = self.sample_alignment(source, clip, requested_start, duration, max_drift)
         if abs(offset - requested_start) > max_drift:
             raise MarkerError('Matched clip start is too far from the requested segment start')
         # Check the tail too: the export must be one continuous, unchanged section.
         if duration > 6:
-            tail = self.packets(clip, duration - 4, 5)
-            if not tail:
-                raise MarkerError('Cannot verify the end of this clip')
-            first_tail_time = float(tail[0]['pts_time'])
-            source_tail = self.packets(source, first_tail_time + offset - 2, duration - first_tail_time + 5)
-            tail_offset, tail_count = packet_offset(source_tail, tail)
+            tail_offset, tail_count = self.sample_alignment(source, clip, offset, duration, max_drift, tail=True)
             if abs(tail_offset - offset) > 0.002:
                 raise MarkerError('Beginning and end have different offsets; merged/retimed export is not supported')
             count += tail_count
         return offset, count
+
+    def sample_alignment(self, source: Path, clip: Path, expected_offset: float,
+                         duration: float, max_drift: float, *, tail: bool = False) -> tuple[float, int]:
+        # Static AV1 footage may repeat every packet in a four-second sample.
+        # Enlarge the evidence window, never lower the uniqueness requirement or
+        # retry contradictory evidence. Keep source searches near the saved cut.
+        last_error = None
+        previous_window = None
+        for size in (4, 8, 16, 32):
+            window = min(size, duration)
+            if window == previous_window:
+                break
+            previous_window = window
+            start = max(0, duration - window) if tail else 0
+            packets = self.packets(clip, start, window + (1 if tail else 0))
+            if not packets:
+                raise MarkerError(f'Cannot verify the {"end" if tail else "beginning"} of this clip: no video packets')
+            first_time = min(float(p['pts_time']) for p in packets if 'pts_time' in p)
+            last_time = max(float(p['pts_time']) for p in packets if 'pts_time' in p)
+            source_start = max(0, expected_offset + first_time - max_drift)
+            source_end = expected_offset + last_time + max_drift + 2
+            # Absolute end avoids shortening the search when seeking lands on an
+            # earlier keyframe. FFprobe may legitimately return that preroll.
+            source_packets = self.probe(source, '-select_streams', 'v:0', '-read_intervals',
+                                        f'{source_start:.6f}%{source_end:.6f}',
+                                        '-show_packets', '-show_data_hash', 'sha256',
+                                        '-show_entries', 'packet=pts_time,data_hash').get('packets', [])
+            try:
+                return packet_offset(source_packets, packets)
+            except InsufficientPacketMatches as exc:
+                last_error = exc
+        raise InsufficientPacketMatches(
+            f'Cannot verify {"end" if tail else "beginning"} after sampling up to {previous_window:g}s: '
+            f'{last_error}. Repeated/static video, a different source, or a re-encoded export can cause this; '
+            'check the source and saved cut, then re-export without smart cut if needed.')
 
     def stream_hashes(self, path: Path) -> str:
         return self.run([self.ffmpeg, '-hide_banner', '-loglevel', 'error', '-i', str(path),
@@ -107,11 +138,11 @@ def packet_offset(source_packets: list[dict], clip_packets: list[dict]) -> tuple
             clips[packet['data_hash']].append(float(packet['pts_time']))
     offsets = [times[0] - clips[key][0] for key, times in sources.items()
                if len(times) == 1 and len(clips.get(key, [])) == 1]
-    if len(offsets) < 5:
-        raise MarkerError('Not enough unique matching video packets to verify timing (need 5); source, rename, or smart-cut mismatch')
-    median = statistics.median(offsets)
-    if max(abs(value - median) for value in offsets) > 0.002:
+    median = statistics.median(offsets) if offsets else 0
+    if offsets and max(abs(value - median) for value in offsets) > 0.002:
         raise MarkerError('Matching packets have inconsistent timestamps')
+    if len(offsets) < 5:
+        raise InsufficientPacketMatches(f'Found {len(offsets)} unique matching video packets; need at least 5')
     return median, len(offsets)
 
 
