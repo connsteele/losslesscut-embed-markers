@@ -26,6 +26,7 @@ class MaintenanceTests(unittest.TestCase):
         repo = Path(__file__).resolve().parent.parent
         shutil.copy2(repo / 'reset-setup.ps1', self.root / 'reset-setup.ps1')
         shutil.copy2(repo / 'run.cmd', self.root / 'run.cmd')
+        shutil.copy2(repo / 'select-action.ps1', self.root / 'select-action.ps1')
         shutil.copy2(repo / 'llc_markers' / 'maintenance.py', self.root / 'llc_markers' / 'maintenance.py')
 
     def tearDown(self):

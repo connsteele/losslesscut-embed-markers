@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import defaultdict
 from fractions import Fraction
 import json
+import math
 import os
 from pathlib import Path
 import statistics
@@ -34,7 +35,10 @@ class MediaTools:
 
     def probe(self, path: Path, *args) -> dict:
         try:
-            return json.loads(self.run([self.ffprobe, '-v', 'error', *args, '-of', 'json', str(path)]))
+            data = json.loads(self.run([self.ffprobe, '-v', 'error', *args, '-of', 'json', str(path)]))
+            if not isinstance(data, dict):
+                raise ValueError('Expected an object')
+            return data
         except ValueError as exc:
             raise MarkerError('FFprobe returned invalid JSON') from exc
 
@@ -48,8 +52,10 @@ class MediaTools:
 
     def alignment(self, source: Path, clip: Path, requested_start: float, requested_end: float,
                   info: dict, source_info: dict, max_drift: float = 8) -> tuple[float, int]:
-        duration = float(info['format']['duration'])
-        if abs(float(source_info['format'].get('start_time', 0))) > 0.05:
+        duration = finite_time(info['format']['duration'])
+        if duration <= 0:
+            raise MarkerError('Clip duration must be positive')
+        if abs(finite_time(source_info['format'].get('start_time', 0))) > 0.05:
             raise MarkerError('Source has a nonzero container start time; this timing convention is not supported yet')
         if abs(duration - (requested_end - requested_start)) > max_drift:
             raise MarkerError('Clip duration differs too much from the named segment; possible stale or merged export')
@@ -80,8 +86,10 @@ class MediaTools:
             packets = self.packets(clip, start, window + (1 if tail else 0))
             if not packets:
                 raise MarkerError(f'Cannot verify the {"end" if tail else "beginning"} of this clip: no video packets')
-            first_time = min(float(p['pts_time']) for p in packets if 'pts_time' in p)
-            last_time = max(float(p['pts_time']) for p in packets if 'pts_time' in p)
+            times = [finite_time(p['pts_time']) for p in packets if 'pts_time' in p]
+            if not times:
+                raise MarkerError('Video packets have no presentation timestamps')
+            first_time, last_time = min(times), max(times)
             source_start = max(0, expected_offset + first_time - max_drift)
             source_end = expected_offset + last_time + max_drift + 2
             # Absolute end avoids shortening the search when seeking lands on an
@@ -127,15 +135,25 @@ class MediaTools:
             raise MarkerError('Encoded audio/video hashes differ; refusing to replace the clip')
 
 
+def finite_time(value) -> float:
+    try:
+        result = float(value)
+        if isinstance(value, bool) or not math.isfinite(result):
+            raise ValueError()
+        return result
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise MarkerError(f'Invalid media timestamp: {value!r}') from exc
+
+
 def packet_offset(source_packets: list[dict], clip_packets: list[dict]) -> tuple[float, int]:
     sources = defaultdict(list)
     clips = defaultdict(list)
     for packet in source_packets:
         if 'data_hash' in packet and 'pts_time' in packet:
-            sources[packet['data_hash']].append(float(packet['pts_time']))
+            sources[packet['data_hash']].append(finite_time(packet['pts_time']))
     for packet in clip_packets:
         if 'data_hash' in packet and 'pts_time' in packet:
-            clips[packet['data_hash']].append(float(packet['pts_time']))
+            clips[packet['data_hash']].append(finite_time(packet['pts_time']))
     offsets = [times[0] - clips[key][0] for key, times in sources.items()
                if len(times) == 1 and len(clips.get(key, [])) == 1]
     median = statistics.median(offsets) if offsets else 0
@@ -147,7 +165,7 @@ def packet_offset(source_packets: list[dict], clip_packets: list[dict]) -> tuple
 
 
 def read_chapters(info: dict) -> list[Chapter]:
-    return sorted([Chapter(float(c['start_time']), float(c['end_time']), c.get('tags', {}).get('title', ''))
+    return sorted([Chapter(finite_time(c['start_time']), finite_time(c['end_time']), c.get('tags', {}).get('title', ''))
                    for c in info.get('chapters', [])], key=lambda c: c.start)
 
 

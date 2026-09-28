@@ -33,6 +33,7 @@ class ModelTests(unittest.TestCase):
             for value in [
                 {'version':1},
                 {'version':2,'mediaFileName':'a.mp4','cutSegments':[{'start':float('nan'),'name':'bad'}]},
+                {'version':2,'mediaFileName':'a.mp4','cutSegments':[{'start':10**1000,'name':'bad'}]},
                 {'version':2,'mediaFileName':'a.mp4','cutSegments':[{'start':1,'end':0}]},
                 {'version':2,'mediaFileName':'a.mp4','cutSegments':[{'start':1,'name':''}]},
             ]:

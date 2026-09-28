@@ -46,7 +46,10 @@ class Chapter:
 def number(value, label: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise MarkerError(f'{label} must be a number')
-    value = float(value)
+    try:
+        value = float(value)
+    except OverflowError as exc:
+        raise MarkerError(f'{label} is too large') from exc
     if not math.isfinite(value) or value < 0:
         raise MarkerError(f'{label} must be finite and non-negative')
     return value

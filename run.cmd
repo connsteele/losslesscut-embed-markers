@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal DisableDelayedExpansion
 cd /d "%~dp0"
 echo LosslessCut Embed Markers
 echo 1. Preview the batch - no media changes
@@ -8,11 +8,13 @@ echo    Also clean up verified projects if enabled in config.local.toml
 echo 3. Open the latest readable report
 echo 4. Reset setup - keep config, footage, backups, and history
 echo 5. Exit
-choice /c 12345 /n /m "Choose 1, 2, 3, 4, or 5: "
-if errorlevel 5 exit /b 0
-if errorlevel 4 goto reset_setup
-if errorlevel 3 goto latest_report
-if errorlevel 2 goto apply
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0select-action.ps1"
+if errorlevel 16 exit /b 1
+if errorlevel 15 exit /b 0
+if errorlevel 14 goto reset_setup
+if errorlevel 13 goto latest_report
+if errorlevel 12 goto apply
+if not errorlevel 11 exit /b 1
 set "MARKER_MODE=preview"
 goto process
 :apply

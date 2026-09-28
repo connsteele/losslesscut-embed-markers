@@ -6,9 +6,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shutil
+import stat
 import tempfile
 import time
 import uuid
@@ -37,6 +39,9 @@ class Settings:
     remove_placeholder_chapters: bool = False
 
     def validate(self):
+        for name in ('prefix', 'ffmpeg', 'ffprobe'):
+            if not isinstance(getattr(self, name), str) or (name != 'prefix' and not getattr(self, name).strip()):
+                raise MarkerError(f'{name} must be text' + (' and not empty' if name != 'prefix' else ''))
         for name in ('delete_projects_after_success', 'remove_placeholder_chapters'):
             if not isinstance(getattr(self, name), bool):
                 raise MarkerError(f'{name} must be true or false (without quotes)')
@@ -45,8 +50,11 @@ class Settings:
             if not path.is_dir():
                 raise MarkerError(f'{name} is not a directory: {path}')
         for path in (self.work_dir, self.output_dir):
-            if path and (path == self.clips_dir or self.clips_dir.is_relative_to(path)):
-                raise MarkerError('Work/output directory must not contain the clips directory')
+            if path and any(root.is_relative_to(path) for root in
+                            (self.clips_dir, self.projects_dir, self.sources_dir)):
+                raise MarkerError('Work/output directory must not contain a clips, projects, or sources directory')
+        if self.output_dir and self.output_dir.is_relative_to(self.sources_dir):
+            raise MarkerError('Output directory must not be inside the original sources directory')
         if self.output_dir and (self.output_dir == self.work_dir or self.output_dir.is_relative_to(self.work_dir)
                                 or self.work_dir.is_relative_to(self.output_dir)):
             raise MarkerError('Output and work directories must be separate')
@@ -85,22 +93,60 @@ def load_state(path: Path) -> dict | None:
         return None
     try:
         data = json.loads(path.read_text(encoding='utf-8'))
-        if data.get('version') != 1:
+        if not isinstance(data, dict) or data.get('version') != 1:
             raise ValueError('Unrecognized state version')
+        if data.get('status') != 'complete':
+            raise ValueError('State is not a completed transaction; inspect the recovery record')
+        for key in ('base_chapters', 'chapters'):
+            if not isinstance(data.get(key), list):
+                raise ValueError(f'Missing or invalid {key}')
+            for chapter in data[key]:
+                if not isinstance(chapter, dict) or set(chapter) != {'start', 'end', 'title'}:
+                    raise ValueError(f'Invalid chapter in {key}')
+                start, end = chapter['start'], chapter['end']
+                if (any(isinstance(v, bool) or not isinstance(v, (float, int)) or not math.isfinite(v)
+                        for v in (start, end)) or not 0 <= start < end or not isinstance(chapter['title'], str)):
+                    raise ValueError(f'Invalid chapter range or label in {key}')
+        for key in ('input_signature', 'output_signature'):
+            value = data.get(key)
+            if not isinstance(value, dict) or any(type(value.get(k)) is not int for k in ('size', 'mtime_ns')):
+                raise ValueError(f'Missing or invalid {key}')
+        if not isinstance(data.get('output_sha256'), str) or len(data['output_sha256']) != 64:
+            raise ValueError('Missing or invalid output checksum')
         return data
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, OverflowError) as exc:
         raise MarkerError(f'Cannot read processing state {path}: {exc}') from exc
+
+
+def linked_path(path: Path) -> bool:
+    """Also recognize Windows junctions, which Path.is_symlink does not cover."""
+    return path.is_symlink() or bool(getattr(path.lstat(), 'st_file_attributes', 0)
+                                     & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0))
+
+
+def check_destination_path(settings: Settings, destination: Path):
+    root = settings.output_dir or settings.clips_dir
+    if not destination.resolve().is_relative_to(root):
+        raise MarkerError('Destination leaves the configured output directory through a linked path')
+    for path in (destination, *destination.parents):
+        if path == root:
+            break
+        if (path.exists() or path.is_symlink()) and linked_path(path):
+            raise MarkerError(f'Destination uses a linked file or directory: {path}')
 
 
 def files_under(root: Path, suffixes: set[str], exclude: tuple[Path, ...] = ()) -> list[Path]:
     results = []
-    for current, dirs, files in os.walk(root, followlinks=False):
+    def scan_error(exc):
+        raise MarkerError(f'Cannot scan {exc.filename}: {exc.strerror or exc}') from exc
+
+    for current, dirs, files in os.walk(root, followlinks=False, onerror=scan_error):
         folder = Path(current)
-        dirs[:] = [name for name in dirs if not (folder / name).is_symlink()
+        dirs[:] = [name for name in dirs if not linked_path(folder / name)
                    and not any((folder / name).resolve().is_relative_to(e) for e in exclude)]
         for name in files:
             path = folder / name
-            if path.suffix.casefold() in suffixes and not path.is_symlink():
+            if path.suffix.casefold() in suffixes and not linked_path(path):
                 if not any(path.resolve().is_relative_to(e) for e in exclude):
                     results.append(path.resolve())
     return sorted(results)
@@ -139,10 +185,19 @@ def base_chapters(current: list[Chapter], state: dict | None) -> list[Chapter]:
     raise MarkerError('Existing chapters changed since the last run. Keep this file unchanged and review its state/report.')
 
 
-def install_result(settings, clip, output, destination, original_signature, record, record_path, run_id):
+def install_result(settings, clip, output, destination, original_signature, record, record_path, run_id,
+                   expected_destination, expected_destination_hash=None):
     if signature(clip) != original_signature:
         raise MarkerError('Input clip changed during processing; replacement cancelled')
-    expected_destination = signature(destination) if destination.exists() else None
+    def check_destination():
+        check_destination_path(settings, destination)
+        actual = signature(destination) if destination.exists() else None
+        if actual != expected_destination:
+            raise MarkerError('Destination changed during processing; replacement cancelled')
+        if expected_destination_hash and file_hash(destination) != expected_destination_hash:
+            raise MarkerError('Destination content changed during processing; replacement cancelled')
+
+    check_destination()
     backup = None
     if destination.exists():
         backup = settings.work_dir / 'backups' / run_id / destination.relative_to(
@@ -166,9 +221,7 @@ def install_result(settings, clip, output, destination, original_signature, reco
             raise MarkerError('Final copy verification failed')
         if signature(clip) != original_signature:
             raise MarkerError('Input clip changed before commit')
-        actual_destination = signature(destination) if destination.exists() else None
-        if actual_destination != expected_destination:
-            raise MarkerError('Destination changed before commit')
+        check_destination()
         stat = clip.stat()
         os.utime(stage, ns=(stat.st_atime_ns, stat.st_mtime_ns))
         record['output_signature'] = signature(stage)
@@ -314,6 +367,7 @@ def process_batch(settings: Settings, apply: bool = False, emit=print) -> dict:
     source_index = defaultdict(list)
     for source in files_under(settings.sources_dir, VIDEO_SUFFIXES, exclusions):
         source_index[source.name.casefold()].append(source)
+    protected_sources = {p for candidates in source_index.values() for p in candidates}
     mappings = {}
     if settings.mapping_file:
         mappings = json.loads(settings.mapping_file.read_text(encoding='utf-8-sig'))
@@ -329,13 +383,15 @@ def process_batch(settings: Settings, apply: bool = False, emit=print) -> dict:
     for path in projects:
         try:
             project_signatures[path] = signature(path)
-            if settings.delete_projects_after_success:
-                project_hashes[path] = file_hash(path)
+            project_hashes[path] = file_hash(path)
             project = read_project(path)
             if (signature(path) != project_signatures[path]
-                    or (settings.delete_projects_after_success and file_hash(path) != project_hashes[path])):
+                    or file_hash(path) != project_hashes[path]):
                 raise MarkerError('Project changed while being read; save it and rerun')
             parsed_projects[path] = project
+            adjacent = (path.parent / project.source_name).resolve()
+            if adjacent.is_file():
+                protected_sources.add(adjacent)
             for marker in project.markers:
                 if not any(s.start <= marker.start < s.end for s in project.segments):
                     endings = [s for s in project.segments if s.end == marker.start]
@@ -349,6 +405,8 @@ def process_batch(settings: Settings, apply: bool = False, emit=print) -> dict:
             for segment in project.segments:
                 key, matches = match_clip(project, segment, settings, clips, mappings)
                 considered.update(matches)
+                for match in matches:
+                    claimed[match].append(key)
                 if len(matches) != 1:
                     status = 'ambiguous' if matches else 'missing_export'
                     report_item(status, project=str(path), segment_key=key, segment_name=segment.name,
@@ -360,7 +418,6 @@ def process_batch(settings: Settings, apply: bool = False, emit=print) -> dict:
                     continue
                 job = (project, segment, matches[0], key)
                 jobs.append(job)
-                claimed[matches[0]].append(key)
         except (MarkerError, OSError, ValueError) as exc:
             report_item('invalid_project', project=str(path), message=str(exc))
 
@@ -375,6 +432,9 @@ def process_batch(settings: Settings, apply: bool = False, emit=print) -> dict:
                 report_item('ambiguous', **details, message='Multiple saved segments claim this clip: ' + ', '.join(claimed[clip]))
                 continue
             destination = (settings.output_dir / clip.relative_to(settings.clips_dir)) if settings.output_dir else clip
+            check_destination_path(settings, destination)
+            if clip in protected_sources or destination.resolve() in protected_sources:
+                raise MarkerError('This path is an original source recording; refusing to process it as an export')
             record_path = state_path(settings, destination)
             if record_path.with_suffix('.pending.json').exists():
                 raise MarkerError(f'Interrupted commit recorded at {record_path.with_suffix(".pending.json")}; review recovery instructions')
@@ -384,6 +444,7 @@ def process_batch(settings: Settings, apply: bool = False, emit=print) -> dict:
                 report_item('no_markers', **details, message='No point markers in this segment; no media write needed')
                 continue
             before = signature(clip)
+            input_hash = file_hash(clip) if apply or settings.output_dir else None
             emit(f'[{job_number}/{len(jobs)}] Checking {clip.name}...')
             info = tools.info(clip)
             duration = float(info['format']['duration'])
@@ -391,7 +452,7 @@ def process_batch(settings: Settings, apply: bool = False, emit=print) -> dict:
             source = find_source(project, source_index, clip)
             source_before = signature(source)
             project_before = project_signatures[project.path]
-            if signature(project.path) != project_before:
+            if signature(project.path) != project_before or file_hash(project.path) != project_hashes[project.path]:
                 raise MarkerError('Project changed since batch scanning; save it and rerun')
             if source not in source_infos or source_infos[source][0] != source_before:
                 source_infos[source] = (source_before, tools.info(source))
@@ -424,13 +485,19 @@ def process_batch(settings: Settings, apply: bool = False, emit=print) -> dict:
                            markers=[{'name':m.name, 'source_seconds':m.start, 'clip_seconds':m.start-offset} for m in markers],
                            chapters=chapter_dicts(desired), placeholder_chapters_filtered=chapter_dicts(removed))
             destination_before = signature(destination) if destination.exists() else None
+            destination_hash = input_hash if destination == clip else None
             if destination.exists() and destination != clip:
                 if not state:
                     raise MarkerError('Output already exists without a processing record; refusing to overwrite')
                 if signature(destination) != state['output_signature']:
                     raise MarkerError('Previously generated output changed; refusing to overwrite')
+                destination_hash = file_hash(destination)
+                if destination_hash != state['output_sha256']:
+                    raise MarkerError('Previously generated output content changed; refusing to overwrite')
                 output_chapters = read_chapters(tools.info(destination))
-                same_input = state.get('input_signature') == before
+                # Legacy records have no input hash: conservatively regenerate
+                # the owned copy once, then subsequent runs can skip safely.
+                same_input = state.get('input_signature') == before and state.get('input_sha256') == input_hash
                 up_to_date = same_input and chapters_equal(output_chapters, desired)
             else:
                 up_to_date = destination == clip and chapters_equal(current, desired)
@@ -454,12 +521,17 @@ def process_batch(settings: Settings, apply: bool = False, emit=print) -> dict:
             with tempfile.TemporaryDirectory(prefix='remux-', dir=temp_root) as temporary:
                 output = Path(temporary) / ('marked' + clip.suffix)
                 tools.remux(clip, output, desired, info)
-                if signature(source) != source_before or signature(project.path) != project_before:
-                    raise MarkerError('Source or project changed during processing; try again after saving/exporting')
+                if (signature(source) != source_before or signature(project.path) != project_before
+                        or file_hash(project.path) != project_hashes[project.path]
+                        or (input_hash and file_hash(clip) != input_hash)):
+                    raise MarkerError('Source, input clip, or project changed during processing; try again after saving/exporting')
                 record = {'version':1, 'run_id':run_id, 'input':str(clip), 'input_signature':before,
                           'project':str(project.path), 'segment_key':key, 'source':str(source),
                           'offset_seconds':offset, 'base_chapters':chapter_dicts(base), 'chapters':chapter_dicts(desired)}
-                backup = install_result(settings, clip, output, destination, before, record, record_path, run_id)
+                if input_hash:
+                    record['input_sha256'] = input_hash
+                backup = install_result(settings, clip, output, destination, before, record, record_path, run_id,
+                                        destination_before, destination_hash)
             remember_verification(destination, desired, record['output_signature'], record['output_sha256'])
             report_item('updated', **details, backup=str(backup) if backup else None,
                         message=f'Wrote {len(markers)} point marker(s); excluded {len(removed)} existing placeholder(s); verified unchanged audio/video')

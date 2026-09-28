@@ -321,6 +321,7 @@ class CleanupTests(MediaTestCase):
     def test_project_edit_with_same_size_and_timestamp_prevents_cleanup(self):
         info = MediaTools.info
         edited = False
+        original = file_hash(self.clip)
 
         def edit_after_scan(tools, path):
             nonlocal edited
@@ -334,8 +335,9 @@ class CleanupTests(MediaTestCase):
         with patch.object(MediaTools, 'info', new=edit_after_scan):
             report = self.unchecked_batch()
         self.assertTrue(self.project.exists())
-        self.assertEqual(report['cleanup_summary'], {'error': 1})
-        self.assertIn('Project changed', report['cleanup_results'][0]['message'])
+        self.assertEqual(report['cleanup_summary'], {'retained': 1})
+        self.assertTrue(any('Project changed' in r['message'] for r in report['results']))
+        self.assertEqual(file_hash(self.clip), original)  # Rejected before any media write.
 
     def test_export_changed_after_processing_prevents_cleanup(self):
         from llc_markers.engine import cleanup_projects

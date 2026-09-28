@@ -38,6 +38,8 @@ Chapter titles supply marker names. LosslessCut colors and arbitrary tags are no
 
 The launcher processes the configured batch once; it does not prompt for each clip or watch folders. Local configuration, the virtual environment, and media are excluded from Git.
 
+Type a menu number and **press Enter** to start that action. A number by itself does nothing. Blank or invalid entries ask again; closing the input exits without starting a job. A failure to load the menu helper also exits without processing.
+
 The menu also offers **3 — Open the latest readable report**, **4 — Reset setup**, and **5 — Exit**. Reset removes only `.venv`, generated package metadata, and known Python cache directories. It preserves `config.local.toml`, footage, mapping files, and all working data, including backups, reports, and processing state. Run `setup.cmd` afterward to rebuild the environment with your existing configuration. Reset remains accessible when `.venv` is missing, using Python on PATH for its checks.
 
 Reset refuses to proceed if a run lock exists, a configured media/work directory overlaps a reset target, or a target contains linked files/directories. Finish active processing first. The reset operates only on the repository containing the launcher; it does not uninstall Python or FFmpeg or change Windows settings. Use this option instead of `git clean -fdX`, which would also erase ignored recovery data. Reset deliberately keeps your configuration; to change its settings, edit `config.local.toml` using the example as a reference.
@@ -79,7 +81,7 @@ The default working directory is anchored to the repository's location, not your
 | `ffmpeg`, `ffprobe` | Executable names on PATH or full executable paths. |
 | `work_dir` | Optional: temporary media, state, reports, and backups. Defaults to the repo's `.llc-markers-work`. |
 
-Work/output directories are excluded from scans. Symbolic links are not followed. Each destination must match one segment; ambiguous associations are reported and left unchanged.
+Work/output directories are excluded from scans. Symbolic links and Windows junctions are not followed, and linked destinations are rejected. An unreadable directory fails the scan instead of silently appearing empty. Work/output directories cannot contain the configured media/project roots, and copied outputs cannot be placed inside the original source directory. Original recordings found in sources_dir or beside a project are protected even if a segment label matches their filenames. Each destination must match one segment; candidates from ambiguous matches also remain reserved and cannot be modified through another project's claim.
 
 ### Matching renamed clips
 
@@ -150,6 +152,8 @@ The original chapter baseline is kept in processing state. Turning this setting 
 ### Repeat runs and edits
 
 Keep `work_dir/state` between runs. It records which chapters the tool created and which existed beforehand. Unchanged clips are skipped. Editing a point marker's text or position in the `.llc` updates its chapter on the next apply; removing annotations removes corresponding managed chapters. Chapters altered outside the tool are reported for review rather than overwritten.
+
+Copy mode compares input checksums and verifies an existing output against its recorded checksum, even when project cleanup is off. Older copy-mode records without an input checksum conservatively regenerate their owned output once; preview lists that write. Apply checks input/project content and checks the destination again before replacing it. A destination that appears or changes during processing is preserved and reported as an error. Malformed processing records become per-clip errors; unrelated clips can continue.
 
 Process markers **before filing/renaming exports** where possible. State is associated with the destination path. If you move a processed export and later want to update/remove its annotations, its processing record must be migrated too; automatic state migration is not implemented yet.
 
@@ -230,6 +234,8 @@ If a `state/*.pending.json` exists, the tool stops processing that destination. 
 ## Development and tests
 
 Tests use Python's built-in `unittest`. Integration tests generate small synthetic H.264/AAC clips, so the test FFmpeg build needs `libx264`, AAC, and lavfi `testsrc2`/`sine`. Runtime use does not require an encoder.
+
+An additional AV1/two-FLAC-track fixture uses `libaom-av1` and is skipped if that optional encoder is unavailable. Windows tests exercise the actual menu prompt (including a digit without Enter, invalid input, and input closure), setup reset, and directory-junction protection. Audit cases simulate competing clip claims, corrupt state, same-size/timestamp edits, a destination appearing during processing, and failure to save state after replacement. All test media belongs in the process TEMP directory; these tests do not process the local configured footage.
 
 ```powershell
 # Keep generated test media off the system drive.
